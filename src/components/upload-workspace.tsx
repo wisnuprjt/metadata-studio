@@ -3,16 +3,22 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  CalendarClock,
+  Camera,
   FileImage,
   LockKeyhole,
   RotateCcw,
   UploadCloud,
-  Camera,
-  CalendarClock,
 } from "lucide-react";
+
 import { formatBytes } from "@/lib/utils";
 import { MetadataInspector } from "@/components/metadata-inspector";
 import { CameraBrandDisplay } from "@/components/camera-brand/camera-brand-display";
+import {
+  LocationInformation,
+  type LocationResult,
+  type LocationStatus,
+} from "@/components/location-information";
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
@@ -20,6 +26,10 @@ const ACCEPTED_TYPES = [
   "image/jpeg",
   "image/png",
   "image/webp",
+  "image/heic",
+  "image/heif",
+  "image/heic-sequence",
+  "image/heif-sequence",
 ];
 
 type SelectedImage = {
@@ -45,6 +55,46 @@ function getMetadataValue(value: unknown): string {
   return String(value);
 }
 
+function isHeicFile(file: File): boolean {
+  const extension = file.name.toLowerCase();
+
+  const isHeicExtension =
+    extension.endsWith(".heic") ||
+    extension.endsWith(".heif");
+
+  const isHeicMime = [
+    "image/heic",
+    "image/heif",
+    "image/heic-sequence",
+    "image/heif-sequence",
+  ].includes(file.type.toLowerCase());
+
+  return isHeicExtension || isHeicMime;
+}
+
+function isSupportedImage(file: File): boolean {
+  const extension = file.name.toLowerCase();
+
+  const supportedExtension =
+    /\.(jpe?g|png|webp|heic|heif)$/i.test(extension);
+
+  const supportedMime = ACCEPTED_TYPES.includes(
+    file.type.toLowerCase()
+  );
+
+  return supportedExtension || supportedMime;
+}
+
+function getFileFormat(file: File): string {
+  if (file.type) {
+    return file.type.split("/")[1]?.toUpperCase() ?? "Unknown";
+  }
+
+  const extension = file.name.split(".").pop();
+
+  return extension?.toUpperCase() ?? "Unknown";
+}
+
 function formatCaptureDate(value?: Date | string | null) {
   if (!value) return null;
 
@@ -67,8 +117,75 @@ function formatCaptureDate(value?: Date | string | null) {
   };
 }
 
+function getCoordinate(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function getGpsCoordinate(
+  metadata: RawMetadata,
+  coordinateKey: "latitude" | "longitude",
+  rawKey: "GPSLatitude" | "GPSLongitude",
+  refKey: "GPSLatitudeRef" | "GPSLongitudeRef"
+): number | null {
+  const direct = getCoordinate(metadata[coordinateKey]);
+
+  if (direct !== null) {
+    return direct;
+  }
+
+  const raw = metadata[rawKey];
+
+  if (typeof raw !== "number" && !Array.isArray(raw)) {
+    return null;
+  }
+
+  let decimal: number;
+
+  if (typeof raw === "number") {
+    decimal = raw;
+  } else {
+    const parts = raw.map(Number);
+
+    if (
+      parts.length < 3 ||
+      parts.some((part) => !Number.isFinite(part))
+    ) {
+      return null;
+    }
+
+    decimal =
+      Math.abs(parts[0]) +
+      Math.abs(parts[1]) / 60 +
+      Math.abs(parts[2]) / 3600;
+  }
+
+  const reference = String(metadata[refKey] ?? "").toUpperCase();
+
+  if (reference === "S" || reference === "W") {
+    decimal = -Math.abs(decimal);
+  }
+
+  return Number.isFinite(decimal) ? decimal : null;
+}
+
 export function ImageUploadWorkspace() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const requestIdRef = useRef(0);
+
+  // Prevent older asynchronous file conversions from replacing newer files
+  const fileLoadIdRef = useRef(0);
 
   const [image, setImage] = useState<SelectedImage | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -79,7 +196,27 @@ export function ImageUploadWorkspace() {
 
   const [metadataLoading, setMetadataLoading] = useState(false);
 
-  // Receive metadata from the single EXIF parser
+  const [latitude, setLatitude] = useState<number | null>(null);
+  const [longitude, setLongitude] = useState<number | null>(null);
+
+  const [location, setLocation] =
+    useState<LocationResult | null>(null);
+
+  const [locationStatus, setLocationStatus] =
+    useState<LocationStatus>("unavailable");
+
+  const [locationError, setLocationError] = useState("");
+
+  const resetLocation = useCallback(() => {
+    requestIdRef.current += 1;
+
+    setLatitude(null);
+    setLongitude(null);
+    setLocation(null);
+    setLocationStatus("unavailable");
+    setLocationError("");
+  }, []);
+
   const handleMetadataLoaded = useCallback(
     (metadata: RawMetadata) => {
       setCameraMetadata({
@@ -100,13 +237,51 @@ export function ImageUploadWorkspace() {
             : null,
       });
 
+      const lat = getGpsCoordinate(
+        metadata,
+        "latitude",
+        "GPSLatitude",
+        "GPSLatitudeRef"
+      );
+
+      const lon = getGpsCoordinate(
+        metadata,
+        "longitude",
+        "GPSLongitude",
+        "GPSLongitudeRef"
+      );
+
+      if (
+        lat !== null &&
+        lon !== null &&
+        lat >= -90 &&
+        lat <= 90 &&
+        lon >= -180 &&
+        lon <= 180
+      ) {
+        setLatitude(lat);
+        setLongitude(lon);
+        setLocation(null);
+        setLocationError("");
+        setLocationStatus("consent");
+      } else {
+        setLatitude(null);
+        setLongitude(null);
+        setLocation(null);
+        setLocationStatus("unavailable");
+      }
+
       setMetadataLoading(false);
     },
     []
   );
 
-  // Reset image
   const reset = useCallback(() => {
+    // Cancel any pending conversion
+    fileLoadIdRef.current += 1;
+
+    requestIdRef.current += 1;
+
     setImage((current) => {
       if (current) {
         URL.revokeObjectURL(current.url);
@@ -119,12 +294,13 @@ export function ImageUploadWorkspace() {
     setMetadataLoading(false);
     setError(null);
 
+    resetLocation();
+
     if (inputRef.current) {
       inputRef.current.value = "";
     }
-  }, []);
+  }, [resetLocation]);
 
-  // Revoke object URL on replacement or unmount
   useEffect(() => {
     return () => {
       if (image?.url) {
@@ -133,59 +309,212 @@ export function ImageUploadWorkspace() {
     };
   }, [image?.url]);
 
-  // Image upload handler
-  const loadFile = useCallback((file?: File) => {
-    if (!file) return;
+  const loadFile = useCallback(
+    async (file?: File) => {
+      if (!file) return;
 
-    setError(null);
+      const currentLoadId = ++fileLoadIdRef.current;
 
-    if (!ACCEPTED_TYPES.includes(file.type)) {
-      setError(
-        "Unsupported file type. Please choose a JPG, PNG, or WebP image."
-      );
-      return;
-    }
+      setError(null);
 
-    if (file.size > MAX_FILE_SIZE) {
-      setError("This image exceeds the 50 MB upload limit.");
-      return;
-    }
+      if (!isSupportedImage(file)) {
+        setError(
+          "Unsupported file type. Please choose a JPG, PNG, WebP, HEIC, or HEIF image."
+        );
+        return;
+      }
 
-    if (file.size === 0) {
-      setError("This file is empty or invalid.");
-      return;
-    }
+      if (file.size > MAX_FILE_SIZE) {
+        setError("This image exceeds the 50 MB upload limit.");
+        return;
+      }
 
-    setCameraMetadata(null);
-    setMetadataLoading(true);
+      if (file.size === 0) {
+        setError("This file is empty or invalid.");
+        return;
+      }
 
-    const url = URL.createObjectURL(file);
-    const probe = new Image();
+      resetLocation();
 
-    probe.onload = () => {
-      setImage((current) => {
-        if (current) {
-          URL.revokeObjectURL(current.url);
+      setCameraMetadata(null);
+      setMetadataLoading(true);
+
+      try {
+        let previewBlob: Blob = file;
+
+        // Convert HEIC/HEIF to JPEG locally for browser preview
+        if (isHeicFile(file)) {
+          const { heicTo } = await import("heic-to");
+
+          const converted = await heicTo({
+            blob: file,
+            type: "image/jpeg",
+            quality: 0.92,
+          });
+
+          if (currentLoadId !== fileLoadIdRef.current) {
+            return;
+          }
+
+          previewBlob = converted;
         }
 
-        return {
-          file,
-          url,
-          width: probe.naturalWidth,
-          height: probe.naturalHeight,
+        if (currentLoadId !== fileLoadIdRef.current) {
+          return;
+        }
+
+        const url = URL.createObjectURL(previewBlob);
+        const probe = new Image();
+
+        probe.onload = () => {
+          if (currentLoadId !== fileLoadIdRef.current) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+
+          setImage((current) => {
+            if (current) {
+              URL.revokeObjectURL(current.url);
+            }
+
+            return {
+              // Keep the original file for EXIF metadata parsing
+              file,
+
+              // Use the browser-compatible preview URL
+              url,
+
+              width: probe.naturalWidth,
+              height: probe.naturalHeight,
+            };
+          });
         };
+
+        probe.onerror = () => {
+          URL.revokeObjectURL(url);
+
+          if (currentLoadId !== fileLoadIdRef.current) {
+            return;
+          }
+
+          setMetadataLoading(false);
+
+          setError(
+            "The selected file could not be decoded as an image."
+          );
+        };
+
+        probe.src = url;
+      } catch (cause) {
+        if (currentLoadId !== fileLoadIdRef.current) {
+          return;
+        }
+
+        setMetadataLoading(false);
+
+        setError(
+          cause instanceof Error
+            ? `Unable to process this image: ${cause.message}`
+            : "Unable to process this image. Please try another file."
+        );
+      }
+    },
+    [resetLocation]
+  );
+
+  const resolveLocation = useCallback(async () => {
+    if (latitude === null || longitude === null) return;
+
+    const currentRequestId = ++requestIdRef.current;
+
+    setLocationStatus("loading");
+    setLocationError("");
+
+    try {
+      const params = new URLSearchParams({
+        format: "jsonv2",
+        lat: String(latitude),
+        lon: String(longitude),
+        addressdetails: "1",
+        zoom: "18",
       });
-    };
 
-    probe.onerror = () => {
-      URL.revokeObjectURL(url);
-      setMetadataLoading(false);
-      setError(
-        "The selected file could not be decoded as an image."
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?${params.toString()}`,
+        {
+          headers: {
+            Accept: "application/json",
+          },
+        }
       );
-    };
 
-    probe.src = url;
+      if (!response.ok) {
+        if (response.status === 429) {
+          throw new Error(
+            "The location service is busy. Please try again later."
+          );
+        }
+
+        throw new Error(
+          "The location service could not process this request."
+        );
+      }
+
+      const result = await response.json();
+
+      if (currentRequestId !== requestIdRef.current) {
+        return;
+      }
+
+      if (!result || !result.address) {
+        throw new Error(
+          "No address information was found for these coordinates."
+        );
+      }
+
+      const address = result.address;
+
+      setLocation({
+        displayName: result.display_name ?? "",
+        road: address.road,
+        houseNumber: address.house_number,
+        neighbourhood:
+          address.neighbourhood ?? address.quarter,
+        suburb:
+          address.suburb ?? address.city_district,
+        city:
+          address.city ??
+          address.town ??
+          address.village ??
+          address.municipality,
+        district:
+          address.county ?? address.district,
+        state:
+          address.state ?? address.region,
+        country: address.country,
+      });
+
+      setLocationStatus("success");
+    } catch (cause) {
+      if (currentRequestId !== requestIdRef.current) {
+        return;
+      }
+
+      setLocationError(
+        cause instanceof Error
+          ? cause.message
+          : "Unable to resolve this location."
+      );
+
+      setLocationStatus("error");
+    }
+  }, [latitude, longitude]);
+
+  const dismissLocation = useCallback(() => {
+    requestIdRef.current += 1;
+    setLocation(null);
+    setLocationError("");
+    setLocationStatus("denied");
   }, []);
 
   const captureDate = formatCaptureDate(
@@ -228,13 +557,13 @@ export function ImageUploadWorkspace() {
           </span>
 
           <span className="mt-5 rounded-lg border border-[var(--border)] px-3 py-1.5 text-[10px] text-[var(--muted)]">
-            JPG · PNG · WebP · Up to 50 MB
+            JPG · PNG · WebP · HEIC · HEIF · Up to 50 MB
           </span>
 
           <input
             ref={inputRef}
             type="file"
-            accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+            accept="image/jpeg,image/png,image/webp,image/heic,image/heif,image/heic-sequence,image/heif-sequence,.jpg,.jpeg,.png,.webp,.heic,.heif"
             className="hidden"
             onChange={(event) =>
               loadFile(event.target.files?.[0])
@@ -244,12 +573,12 @@ export function ImageUploadWorkspace() {
       ) : (
         /* Image Workspace */
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(260px,0.8fr)]">
-
-          {/* Left Column: Preview + Brand Attribution */}
+          {/* Left Column: Preview + Camera Information */}
           <div className="min-w-0 space-y-4">
-
             {/* Image Preview */}
             <div className="flex min-h-[320px] items-center justify-center overflow-hidden rounded-[22px] border border-[var(--border)] bg-[var(--surface)] p-4">
+              {/* Local blob preview: intentionally bypasses Next.js image optimization */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={image.url}
                 alt="Selected image preview"
@@ -257,17 +586,34 @@ export function ImageUploadWorkspace() {
               />
             </div>
 
-            {/* Camera Brand Recognition */}
-            <CameraBrandDisplay
-              make={cameraMetadata?.Make}
-              model={cameraMetadata?.Model}
-              loading={metadataLoading}
-            />
+            {/* Mobile: Capture Information + Compact Location */}
+            <div className="lg:hidden">
+              <CameraBrandDisplay
+                make={cameraMetadata?.Make}
+                model={cameraMetadata?.Model}
+                loading={metadataLoading}
+                latitude={latitude}
+                longitude={longitude}
+                location={location}
+                locationStatus={locationStatus}
+                locationError={locationError}
+                onResolveLocation={resolveLocation}
+                onDismissLocation={dismissLocation}
+              />
+            </div>
+
+            {/* Desktop: Camera Brand Attribution */}
+            <div className="hidden lg:block">
+              <CameraBrandDisplay
+                make={cameraMetadata?.Make}
+                model={cameraMetadata?.Model}
+                loading={metadataLoading}
+              />
+            </div>
           </div>
 
           {/* Right Column: Image Details */}
           <div className="min-w-0 rounded-[22px] border border-[var(--border)] bg-[var(--surface)] p-5">
-
             {/* Header */}
             <div className="mb-5 flex items-center justify-between">
               <span className="text-[12px] font-semibold">
@@ -275,6 +621,7 @@ export function ImageUploadWorkspace() {
               </span>
 
               <button
+                type="button"
                 onClick={reset}
                 className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface-hover)]"
               >
@@ -295,7 +642,7 @@ export function ImageUploadWorkspace() {
                 </p>
 
                 <p className="mt-1 text-[10px] text-[var(--muted)]">
-                  {image.file.type || "Unknown format"}
+                  {image.file.type || getFileFormat(image.file)}
                 </p>
               </div>
             </div>
@@ -406,12 +753,27 @@ export function ImageUploadWorkspace() {
                   </span>
 
                   <span className="font-medium">
-                    {image.file.type.split("/")[1]?.toUpperCase() ??
-                      "Unknown"}
+                    {getFileFormat(image.file)}
                   </span>
                 </div>
               </div>
             </div>
+
+            {/* Location Information - Desktop */}
+            {latitude !== null && longitude !== null && (
+              <div className="mt-5 hidden border-t border-[var(--border)] pt-4 lg:block">
+                <LocationInformation
+                  latitude={latitude}
+                  longitude={longitude}
+                  location={location}
+                  status={locationStatus}
+                  error={locationError}
+                  variant="detailed"
+                  onResolve={resolveLocation}
+                  onDismiss={dismissLocation}
+                />
+              </div>
+            )}
 
             {/* Privacy Notice */}
             <div className="mt-6 flex items-start gap-2 rounded-xl bg-emerald-500/[0.06] p-3 text-[10px] leading-5 text-[var(--muted)]">

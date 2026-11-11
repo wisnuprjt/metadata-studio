@@ -3,17 +3,36 @@
 
 import { Camera, ShieldCheck } from "lucide-react";
 import { identifyCameraBrand } from "@/lib/camera-brands";
+import {
+  LocationInformation,
+  type LocationResult,
+  type LocationStatus,
+} from "@/components/location-information";
 
 type CameraBrandDisplayProps = {
   make?: string | null;
   model?: string | null;
   loading?: boolean;
+  latitude?: number | null;
+  longitude?: number | null;
+  location?: LocationResult | null;
+  locationStatus?: LocationStatus;
+  locationError?: string;
+  onResolveLocation?: () => void;
+  onDismissLocation?: () => void;
 };
 
 export function CameraBrandDisplay({
   make,
   model,
   loading = false,
+  latitude = null,
+  longitude = null,
+  location = null,
+  locationStatus = "unavailable",
+  locationError,
+  onResolveLocation,
+  onDismissLocation,
 }: CameraBrandDisplayProps) {
   const brand = identifyCameraBrand(make);
 
@@ -23,7 +42,7 @@ export function CameraBrandDisplay({
         <div className="flex items-center gap-2">
           <Camera size={14} className="text-emerald-600" />
           <span className="text-[11px] font-semibold">
-            Camera Brand Attribution
+            Capture Information
           </span>
         </div>
 
@@ -80,6 +99,7 @@ export function CameraBrandDisplay({
               <p className="text-[13px] font-medium">
                 Camera brand not identified
               </p>
+
               <p className="mt-1 text-[10px] text-[var(--muted)]">
                 {make
                   ? `Unsupported manufacturer: ${make}`
@@ -89,6 +109,21 @@ export function CameraBrandDisplay({
           </div>
         )}
       </div>
+
+      {latitude !== null && longitude !== null && (
+        <div className="mt-4 border-t border-[var(--border)] pt-4">
+          <LocationInformation
+            latitude={latitude}
+            longitude={longitude}
+            location={location}
+            status={locationStatus}
+            error={locationError}
+            variant="compact"
+            onResolve={onResolveLocation ?? (() => {})}
+            onDismiss={onDismissLocation ?? (() => {})}
+          />
+        </div>
+      )}
     </section>
   );
 }

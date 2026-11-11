@@ -202,9 +202,16 @@ export function MetadataInspector({
 }: MetadataInspectorProps) {
   const [metadata, setMetadata] = useState<RawMetadata | null>(null);
 
-  const [status, setStatus] = useState<
-    "loading" | "ready" | "empty" | "error"
-  >("loading");
+  // Track which file has completed parsing
+  const [processedFile, setProcessedFile] = useState<File | null>(null);
+
+  const [parseStatus, setParseStatus] = useState<
+    "ready" | "empty" | "error"
+  >("empty");
+
+  // Derive loading state instead of setting it synchronously in an effect
+  const status =
+    processedFile === file ? parseStatus : "loading";
 
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -216,11 +223,6 @@ export function MetadataInspector({
   // Single EXIF parsing source for the entire workspace
   useEffect(() => {
     let active = true;
-
-    setStatus("loading");
-    setMetadata(null);
-    setError("");
-    setQuery("");
 
     (async () => {
       try {
@@ -243,9 +245,11 @@ export function MetadataInspector({
         const parsed = (result ?? {}) as RawMetadata;
 
         setMetadata(parsed);
-        setStatus(
+        setParseStatus(
           Object.keys(parsed).length ? "ready" : "empty"
         );
+        setError("");
+        setProcessedFile(file);
 
         // Share parsed metadata with the parent workspace
         onMetadataLoaded?.(parsed);
@@ -258,7 +262,8 @@ export function MetadataInspector({
             : "The metadata could not be read."
         );
 
-        setStatus("error");
+        setParseStatus("error");
+        setProcessedFile(file);
         onMetadataLoaded?.({});
       }
     })();

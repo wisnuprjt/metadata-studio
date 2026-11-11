@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import {
   Aperture,
   ChevronDown,
@@ -22,6 +22,10 @@ import {
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
+
+const emptySubscribe = () => () => {};
+const getClientSnapshot = () => true;
+const getServerSnapshot = () => false;
 
 const navigation = [
   { label: "Overview", href: "/", icon: LayoutDashboard },
@@ -45,11 +49,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   // Theme hydration protection
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  const mounted = useSyncExternalStore(
+    emptySubscribe,
+    getClientSnapshot,
+    getServerSnapshot
+  );
 
   const isDark = mounted && resolvedTheme === "dark";
 
@@ -334,13 +338,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
 
-          {/* Local Processing Status */}
+          {/* Developer Attribution */}
           <div className="ml-3 flex shrink-0 items-center gap-2 rounded-full border border-[var(--border)] px-3 py-1.5 text-[11px] text-[var(--muted)]">
             <span className="size-1.5 rounded-full bg-emerald-500" />
-            <span className="hidden sm:inline">
-              Local processing enabled
-            </span>
-            <span className="sm:hidden">Local</span>
+            <span>Code by @wisnuprjt</span>
           </div>
         </header>
 
